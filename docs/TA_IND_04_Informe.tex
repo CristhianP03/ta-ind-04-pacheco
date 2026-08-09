@@ -1,0 +1,584 @@
+\documentclass[11pt]{article}
+
+% ---------- Preámbulo ----------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{siunitx}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[backend=biber,style=ieee,sorting=none]{biblatex}
+\usepackage{hyperref}
+\addbibresource{references.bib}
+
+\title{TA-IND-04 --- Informe Técnico Individual\\
+\large Análisis de Rendimiento Paralelo aplicado al Proyecto Fin de Curso}
+\author{}
+\date{}
+
+\begin{document}
+
+% ============================================================
+% PORTADA
+% ============================================================
+\begin{titlepage}
+\centering
+{\large UNIVERSIDAD TÉCNICA ESTATAL DE QUEVEDO}\\
+Facultad de Ciencias de la Computación\\
+Carrera de Ingeniería de Software\\[1.5em]
+
+{\Large\bf TA-IND-04 --- Informe Técnico Individual}\\[0.3em]
+{\large Análisis de Rendimiento Paralelo (Unidad 4)\\
+aplicado al Proyecto Fin de Curso}\\[1.5em]
+
+Asignatura: Aplicaciones Distribuidas (ISR-701)\\
+Unidad 4 --- Cómputo Paralelo y Distribuido\\
+Período académico: 2026--2027 PPA\\[2em]
+
+\begin{tabular}{ll}
+\textbf{Estudiante:} & Cristhian Daniel Pacheco Cárdenas \\
+\textbf{Equipo de PE-U4:} & Equipo A --- Cristhian Daniel Pacheco Cárdenas, \\
+ & Robinson Rodrigo Cando Moreno, Ernesto Gregory Luna Mora \\
+\textbf{PFC de referencia:} & ACC --- Sistema de Gestión de Soporte Técnico ISP \\
+\textbf{Transformación foco:} & T3 (Join, \emph{tickets} $\bowtie$ \emph{agentes}) \\
+\textbf{Repositorio individual:} & \url{https://github.com/CristhianP03/ta-ind-04-pacheco} \\
+\textbf{Fecha:} & 8 de agosto de 2026 \\
+\end{tabular}
+
+\vfill
+\textbf{Docente:} Gleiston C. Guerrero-Ulloa, M.Sc.
+\end{titlepage}
+
+\section{Introducción y contexto}
+
+Este informe analiza, de forma individual, los resultados de speedup
+obtenidos en la práctica grupal GA-SUM-05/PE-U4, en la que el equipo A
+implementó y midió cinco transformaciones (T1--T5) sobre un dataset
+sintético de 600\,000 tickets de soporte técnico ISP, comparando pandas
+(línea base de una sola máquina) contra PySpark 3.5.3 en Google Colab,
+con escalado controlado de T3 (unión \emph{tickets}$\bowtie$\emph{agentes})
+en $N=1,2,4$ executors. El objetivo de este documento no es repetir ese
+experimento grupal, sino someter sus resultados a un análisis
+cuantitativo propio frente al modelo de Amdahl, diagnosticar la fracción
+no escalable observada, y fundamentar --- con datos propios de PE-U4 y
+la arquitectura real del Proyecto Fin de Curso --- una propuesta
+concreta de integración del procesamiento distribuido en dicho proyecto.
+
+Los datos base se tomaron del repositorio
+\url{https://github.com/CristhianP03/pe-u4-spark-equipoA}, commit
+\texttt{aac987686e1d8dd0559b3ea6ed07af3335570ced}, archivo
+\texttt{resultados/tiempos\_resumen.csv}, verificado línea por línea
+contra las mediciones crudas del mismo repositorio antes de su uso en
+este documento. Se descartó explícitamente el uso de cualquier tabla o
+cálculo del informe grupal (\texttt{docs/PE\_U4\_Informe.pdf}) más allá
+de los datos crudos de tiempos: el ajuste de Amdahl, la métrica de
+Karp-Flatt y el umbral de rentabilidad presentados aquí emplean una
+metodología propia, distinta de la reportada por el equipo, como se
+declara explícitamente en la Sección~9.
+
+El dominio de referencia es \textbf{ACC --- Sistema de Gestión de
+Soporte Técnico ISP}, un sistema de microservicios (Spring Boot, Node.js
+y FastAPI) con persistencia sobre un clúster CockroachDB de 3 nodos, en
+cuya Entrega 3 ya existe un \emph{pipeline} de Spark propio para
+detección de reincidencia de clientes y \emph{clustering} de tickets ---
+pipeline cuya integración formal, periodicidad, dimensionamiento y
+consumidor de salida son precisamente el objeto de la Sección~5 de este
+informe.
+
+\section{Análisis propio de los resultados de speedup}
+
+\subsection{Marco matemático}
+
+La ley de Amdahl relaciona el speedup $S(N)$ obtenido con $N$ unidades
+de procesamiento y la fracción paralelizable $p$ del cómputo:
+
+\begin{equation}
+S(N) = \frac{1}{(1-p) + \dfrac{p}{N}}, \qquad
+S_{\max} = \lim_{N\to\infty} S(N) = \frac{1}{1-p}.
+\label{eq:amdahl}
+\end{equation}
+
+\subsection{Datos base}
+
+Los tiempos de ejecución se tomaron del commit
+\texttt{aac987686e1d8dd0559b3ea6ed07af3335570ced} del repositorio de
+PE-U4 del equipo A, archivo \texttt{resultados/tiempos\_resumen.csv},
+generado sobre Google Colab con PySpark 3.5.3. Cada valor corresponde a
+la mediana de 5 repeticiones cronometradas, tras descartar una ejecución
+de calentamiento por combinación (transformación, motor).
+
+\begin{table}[h]
+\centering
+\caption{Tiempos medianos y speedup medido por transformación.}
+\label{tab:tiempos}
+\begin{tabular}{lccS[table-format=2.3]S[table-format=1.3]}
+\toprule
+Transf. & Motor & $N$ & {$T$ (\si{\second})} & {$S(N)$} \\
+\midrule
+T1 & pandas & --- & 9.437  & --- \\
+T1 & Spark  & 4    & 6.210  & 1.520 \\
+T2 & pandas & --- & 8.345  & --- \\
+T2 & Spark  & 4    & 4.363  & 1.913 \\
+T3 & pandas & --- & 10.119 & --- \\
+T3 & Spark  & 1    & 7.891  & 1.282 \\
+T3 & Spark  & 2    & 7.059  & 1.433 \\
+T3 & Spark  & 4    & 7.087  & 1.428 \\
+T4 & pandas & --- & 12.296 & --- \\
+T4 & Spark  & 4    & 8.381  & 1.467 \\
+T5 & pandas & --- & 6.269  & --- \\
+T5 & Spark  & 4    & 2.450  & 2.558 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Análisis agregado de las cinco transformaciones}
+
+Las cinco transformaciones muestran speedups a $N=4$ entre 1.467 (T4,
+columna derivada) y 2.558 (T5, top-\emph{N}). T5 obtiene el mayor
+beneficio porque su costo dominante es una agregación con muy pocas
+filas de salida, que Spark resuelve con un \emph{shuffle} reducido tras
+la fase de agregación parcial por partición. T4, en cambio, aplica
+transformaciones fila por fila sin reordenar datos entre particiones;
+pandas ya ejecuta esa operación de forma vectorizada y eficiente en
+memoria, de modo que el margen de mejora al distribuirla es menor.
+
+\subsection{Desarrollo matemático completo para la transformación foco (T3)}
+
+Para T3 se dispone de mediciones con $N=1,2,4$ executors, lo que permite
+ajustar la fracción paralelizable $p$ de la ecuación~\eqref{eq:amdahl}
+por mínimos cuadrados. Se excluye deliberadamente el punto $N=1$ del
+ajuste: la ley de Amdahl impone $S(1)=1$ por construcción (sin
+paralelismo no hay aceleración posible), mientras que el valor medido es
+$S(1)=1.282$; esa diferencia no proviene de paralelismo --- imposible
+con un único executor --- sino de que Spark y pandas son motores de
+ejecución distintos, y el optimizador de consultas de Spark ya introduce
+ganancias de motor independientes del número de executors. Incluir ese
+punto en el ajuste distorsionaría la estimación de $p$ sin aportar
+información sobre escalabilidad real.
+
+Minimizando $\sum_{N\in\{2,4\}}\left(S_{\mathrm{med}}(N)-S(N;p)\right)^2$
+se obtiene $\hat{p}=0.4445$, con lo que la ecuación~\eqref{eq:amdahl}
+predice $S_{\mathrm{teo}}(2)=1.286$, $S_{\mathrm{teo}}(4)=1.500$ y un
+techo asintótico $S_{\max}=1/(1-\hat{p})=1.800$.
+
+\begin{table}[h]
+\centering
+\caption{Speedup medido frente al predicho por la ley de Amdahl ($\hat p = 0.4445$).}
+\label{tab:amdahl}
+\begin{tabular}{cS[table-format=1.3]S[table-format=1.3]S[table-format=-2.2]}
+\toprule
+$N$ & {$S_{\mathrm{med}}$} & {$S_{\mathrm{teo}}$} & {$\Delta$ (\%)} \\
+\midrule
+2 & 1.433 & 1.286 & +11.49 \\
+4 & 1.428 & 1.500 & -4.82  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{figuras/fig_speedup.png}
+\caption{Speedup medido de T3 (unión pandas/Spark) frente a la curva
+teórica de Amdahl ajustada por mínimos cuadrados ($\hat{p}=0.4445$).
+La brecha entre la curva de paralelismo ideal ($S=N$) y la curva teórica
+refleja el límite estructural impuesto por la fracción no paralelizable;
+la brecha entre la curva teórica y los puntos medidos refleja la
+sobrecarga real del motor, que se cuantifica en la Sección~4 mediante
+la métrica de Karp-Flatt.}
+\label{fig:speedup_t3}
+\end{figure}
+
+\subsection{Respuesta a la pregunta 1 de la guía}
+
+Los resultados no coinciden con la predicción de Amdahl de forma
+uniforme: a $N=2$ el speedup medido \emph{supera} al teórico en un
+$11.49\,\%$, mientras que a $N=4$ queda \emph{por debajo} en un
+$4.82\,\%$ (Tabla~\ref{tab:amdahl}, Figura~\ref{fig:speedup_t3}). Esta
+inversión de signo es, en sí misma, el hallazgo relevante. Con dos
+executors, la ganancia adicional de paralelismo todavía compensa la
+sobrecarga de coordinación, y el optimizador de Spark aporta una mejora
+de motor no capturada por el modelo de Amdahl. Con cuatro executors, en
+cambio, el costo de coordinar más particiones --- reparto de trabajo
+del \emph{join}, transferencia de datos entre executors y planificación
+de tareas --- empieza a superar la ganancia marginal de paralelismo,
+algo que Amdahl no puede anticipar porque asume implícitamente que la
+única variable es $N$ y que el costo de coordinación es despreciable
+\cite{amdahl1967}. Hill y Marty señalan precisamente que este tipo de
+rendimientos decrecientes se agrava cuanto mayor es el número de
+unidades coordinadas, incluso en arquitecturas de propósito general
+\cite{hillmarty2008}. La Sección~4 retoma esta misma inversión con la
+métrica de Karp-Flatt, que confirma cuantitativamente que la causa es la
+sobrecarga creciente del motor y no un límite algorítmico fijo.
+
+
+\section{Diagnóstico de la fracción no escalable}
+
+
+\subsection{Métrica de Karp-Flatt}
+
+La fracción serial experimental $e$, determinada a partir del speedup
+observado $S$ con $N$ unidades, se define como:
+
+\begin{equation}
+e = \frac{\dfrac{1}{S} - \dfrac{1}{N}}{1 - \dfrac{1}{N}}, \qquad N > 1.
+\label{eq:karpflatt}
+\end{equation}
+
+Sustituyendo en la ecuación~\eqref{eq:karpflatt} los valores medidos de
+T3 (Tabla~\ref{tab:amdahl}):
+
+\begin{align}
+e(2) &= \frac{\frac{1}{1.43346} - \frac{1}{2}}{1 - \frac{1}{2}}
+      = \frac{0.69761 - 0.5}{0.5} = 0.39522 \\
+e(4) &= \frac{\frac{1}{1.42772} - \frac{1}{4}}{1 - \frac{1}{4}}
+      = \frac{0.70042 - 0.25}{0.75} = 0.60055
+\end{align}
+
+La fracción serial experimental \textbf{crece un 51.95\,\%} al pasar de
+$N=2$ a $N=4$ ($0.395\rightarrow0.601$). Según el criterio de
+interpretación de Karp y Flatt \cite{karpflatt1990}, un valor de $e$
+que se mantiene aproximadamente constante señala un límite algorítmico
+fijo, mientras que un valor creciente indica sobrecarga adicional del
+motor de ejecución al aumentar $N$. El fuerte incremento observado
+descarta la primera hipótesis: la pérdida de escalabilidad de T3 entre
+$N=2$ y $N=4$ no es atribuible a la fracción secuencial intrínseca del
+algoritmo de \emph{join}, sino a costos de coordinación que crecen con
+el número de executors.
+
+\subsection{Eficiencia del paralelismo}
+
+La eficiencia mide qué fracción del beneficio ideal se aprovecha
+realmente por cada unidad de procesamiento adicional:
+
+\begin{equation}
+E(N) = \frac{S(N)}{N}.
+\label{eq:eficiencia}
+\end{equation}
+
+Con los valores medidos de T3, $E(1)=1.282$, $E(2)=0.717$ y
+$E(4)=0.357$ (ecuación~\eqref{eq:eficiencia}): la eficiencia cae de
+forma pronunciada y monótona incluso donde el speedup absoluto todavía
+crece (de $N=1$ a $N=2$), lo que confirma visualmente el mismo
+fenómeno que Karp-Flatt cuantifica --- cada executor adicional aporta
+una fracción decreciente de beneficio real.
+
+\subsection{Atribución a mecanismos concretos del motor}
+
+La captura de la Spark UI para T3 con $N=4$ (\texttt{evidencia/spark\_ui\_t3.png}
+del repositorio de PE-U4, \emph{query} SQL de duración total 12\,s)
+permite identificar cuatro mecanismos concretos que explican el
+crecimiento de $e$:
+
+\begin{enumerate}
+  \item \textbf{Colapso adaptativo de particiones (AQE).} El nodo
+  \texttt{AQEShuffleRead} reporta \texttt{number of coalesced
+  partitions: 1} en ambos lados del \emph{join}. Aunque la sesión de
+  Spark se configuró con 4 executors, el motor de ejecución adaptativa
+  reunió el \emph{shuffle} completo en una única partición por el
+  volumen reducido de datos (180\,003 registros tras el filtrado), de
+  modo que buena parte de la etapa final del \emph{pipeline} corrió
+  efectivamente en un solo executor, independientemente de $N$.
+
+  \item \textbf{Costo de \emph{exchange} (shuffle) del \emph{join}.}
+  Los nodos \texttt{Exchange} muestran 180\,003 registros escritos en
+  \emph{shuffle} en el lado de \texttt{tickets}, con un tiempo de
+  escritura de hasta 604\,ms en el peor \emph{task}. Al usar
+  \texttt{sort-merge join} con difusión desactivada deliberadamente,
+  ambas tablas --- incluida \texttt{agentes}, de solo 300 filas --- se
+  redistribuyen por red en lugar de aprovechar una unión por difusión.
+
+  \item \textbf{Ordenamiento previo al \emph{merge}.} Los nodos
+  \texttt{WholeStageCodegen} de tipo \texttt{Sort} muestran un tiempo de
+  ordenamiento de hasta 594\,ms antes de ejecutar el
+  \texttt{SortMergeJoin}, etapa inherente a la estrategia de \emph{join}
+  cuyo costo no se reduce por agregar executors.
+
+  \item \textbf{Planificación del DAG y evaluación perezosa.} Spark
+  construye el plan de ejecución completo antes de materializarlo, y en
+  este caso generó 4 \emph{jobs} sucesivos debido a la re-planificación
+  adaptativa tras recolectar estadísticas de las etapas iniciales
+  \cite{zaharia2016}. Esa coordinación adicional es un costo fijo que
+  no escala con los datos ni se beneficia de más executors.
+\end{enumerate}
+
+En conjunto, estos cuatro mecanismos --- y en particular el colapso de
+particiones por AQE --- muestran que la sobrecarga de T3 no es un
+fenómeno difuso atribuible de forma genérica al motor, sino un efecto
+localizable y verificable en la propia Spark UI de la ejecución medida.
+
+
+\section{Propuesta de integración al PFC}
+
+
+\subsection{Caso de uso}
+
+El PFC ACC (Sistema de Gestión de Soporte Técnico ISP) ya incorpora,
+desde su Entrega 3, un \emph{pipeline} de Apache Spark orientado a dos
+análisis sobre el histórico de tickets almacenado en
+\texttt{ticket\_db} (CockroachDB, clúster de 3 nodos): (i) detección de
+\textbf{reincidencia de cliente}, mediante una función de ventana
+(\texttt{Window.partitionBy("client\_id").orderBy("timestamp")}) que
+calcula, para cada cliente, el tiempo transcurrido desde su incidencia
+anterior y marca reincidencia cuando esa diferencia es menor a 30 días;
+y (ii) \textbf{clustering} de tickets con K-Means ($k=5$), sobre
+\emph{features} de TF-IDF de la descripción textual combinadas con la
+zona operativa codificada. Para evitar ambigüedad con la nomenclatura de
+PE-U4, estas transformaciones se referencian aquí como
+$T_{\mathrm{reincidencia}}$, $T_{\mathrm{flag30d}}$ y
+$T_{\mathrm{clustering}}$, distintas de T1--T5 de la práctica grupal.
+
+\subsection{Periodicidad y volumen (declarados como decisión propia)}
+
+El pipeline se ejecutó, hasta ahora, una sola vez de forma manual desde
+notebook; no existe una periodicidad definida en el PFC. Se propone,
+como decisión de diseño de este informe, una \textbf{ejecución batch
+mensual}, alineada con el cierre natural de los reportes gerenciales de
+soporte técnico. Para dimensionar esa ejecución se declara el siguiente
+supuesto, explícitamente no derivado de datos medidos del PFC: un ISP
+mediano opera con un volumen de \textbf{aproximadamente 1\,500 tickets
+mensuales} (rango de sensibilidad 500--2\,000, según estacionalidad de
+incidencias de red). Este supuesto alimenta el cálculo del umbral de
+rentabilidad de la Sección~6.
+
+\subsection{Salida producida y decisión de negocio soportada}
+
+La ejecución mensual del pipeline produce, por cliente: la bandera
+$\mathrm{is\_recurring\_30d}$ y el $\mathrm{cluster\_id}$ asignado a
+cada ticket, agregados en dos tablas de salida: (a) conteo de clientes
+reincidentes por zona y categoría, y (b) distribución de tickets por
+clúster y zona. Esta salida soporta una decisión operativa concreta:
+priorizar la atención de campo hacia zonas con alta concentración de
+clientes reincidentes, en vez de tratar cada ticket como un evento
+aislado --- un uso análogo, en espíritu, al enrutamiento automatizado
+de tickets hacia el grupo experto correcto que describen Xu et
+al.~\cite{xu2018} para sistemas de gestión de TI, aunque aquí el
+objetivo no es el enrutamiento en sí sino la identificación proactiva de
+patrones de reincidencia antes de que se conviertan en escaladas de SLA.
+
+\subsection{Punto de inserción en la arquitectura en capas}
+
+La arquitectura de ACC es de microservicios con base de datos por
+servicio: \texttt{auth-service}, \texttt{ticket-service} y
+\texttt{report-service} (Spring Boot/Java) sobre CockroachDB;
+\texttt{notification-service} (Node.js) y \texttt{ai-service}
+(FastAPI/Python) sobre MongoDB; comunicación asíncrona entre servicios
+vía Kafka. El pipeline de Spark se inserta como un \textbf{proceso batch
+independiente}, fuera del flujo síncrono de creación/clasificación de
+tickets: lee mensualmente por JDBC directamente de \texttt{ticket\_db},
+sin pasar por Kafka ni por el \texttt{ai-service}, y escribe sus tablas
+de salida en un esquema separado dentro del mismo clúster CockroachDB.
+\texttt{report-service} --- que ya expone lectura desacoplada bajo un
+patrón CQRS --- añade un \textbf{endpoint nuevo} que consulta esas
+tablas de salida y las expone en un panel para el rol
+\texttt{Administrador} del frontend (Figura~\ref{fig:arquitectura}).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figuras/fig_arquitectura_integracion.png}
+\caption{Punto de inserción del pipeline de Spark en la arquitectura de
+microservicios de ACC. Elaboración propia.}
+\label{fig:arquitectura}
+\end{figure}
+
+Es deliberado que la integración sea por \textbf{lotes y no en flujo},
+pese a que el resto del sistema es orientado a eventos: la detección de
+reincidencia requiere una ventana histórica de 30 días por cliente, una
+agregación que no tiene sentido recalcular evento por evento en tiempo
+real, y que además no puede alimentar de vuelta al \texttt{ai-service}
+sin rediseñar su contrato de clasificación síncrona --- una limitación
+de integración que se reconoce explícitamente aquí y se retoma como
+limitación en la Sección~7.
+
+
+\section{Dimensionamiento y viabilidad}
+
+
+El umbral de rentabilidad modela el tiempo secuencial como
+$T_{\mathrm{sec}}(n)=\alpha n$ y el distribuido como
+$T_{\mathrm{dist}}(n)=\beta+\gamma n/N$, siendo ventajoso el motor
+distribuido cuando $T_{\mathrm{dist}}(n) < T_{\mathrm{sec}}(n)$:
+
+\begin{equation}
+n^{*} = \frac{\beta}{\alpha - \dfrac{\gamma}{N}},
+\qquad \text{válido si } \alpha > \frac{\gamma}{N}.
+\label{eq:umbral}
+\end{equation}
+
+\textbf{Método de ajuste declarado}: $\hat\alpha$ se estima como
+$T_{\mathrm{pandas}}/n$ sobre el punto medido de T3 ($n=600\,000$);
+$\hat\beta$ y $\hat\gamma$ se obtienen por regresión lineal de
+$T_{\mathrm{dist}}$ contra $1/N$ sobre los tres puntos medidos de T3
+($N=1,2,4$), ya que $T_{\mathrm{dist}}=\beta+(\gamma n)\cdot(1/N)$ es
+lineal en $1/N$ para $n$ fijo. El resultado es
+$\hat\alpha=1.6865\times10^{-5}$ \si{\second}/registro,
+$\hat\beta=6.6711$ \si{\second}, $\hat\gamma=1.9280\times10^{-6}$
+\si{\second}/registro. Sustituyendo en la ecuación~\eqref{eq:umbral}
+con $N=4$:
+
+\begin{equation}
+n^{*} = \frac{6.6711}{1.6865\times10^{-5} - \dfrac{1.9280\times10^{-6}}{4}}
+       \approx 407{,}206 \text{ registros.}
+\end{equation}
+
+Con el volumen mensual declarado en la Sección~5
+(\textasciitilde1\,500 tickets/mes), se tardarían aproximadamente 271
+meses (\textasciitilde22 años) en acumular ese volumen en una sola
+ejecución. \textbf{Recomendación}: Spark no se justifica para el batch
+mensual de detección de reincidencia bajo este modelo; se reserva para
+el histórico acumulado completo o para un reentrenamiento anual del
+clustering, mientras que la detección mensual de reincidencia (ventana
+corta, 30 días) se resuelve por debajo del umbral con una consulta SQL
+directa sobre CockroachDB (ver alternativa evaluada en la
+Sección~7.2). El modelo de servicio en la nube recomendado para las
+ejecuciones que sí superen $n^{*}$ es un clúster gestionado de sesión
+efímera (por ejemplo, Databricks Job Clusters o AWS EMR Serverless),
+justificado por el modelo de costos \emph{pay-as-you-go} que describen
+Armbrust et al.~\cite{armbrust2010}: al ejecutarse solo mensualmente o
+anualmente, mantener un clúster persistente no se justifica
+económicamente frente a la elasticidad de aprovisionamiento bajo
+demanda. El principal riesgo identificado es que $\hat\beta$ se estimó
+sobre una sesión de Colab, no representativa del costo de arranque real
+de un clúster gestionado en producción (ver limitación declarada en la
+Sección~7.4).
+
+
+\section{Postura crítica y alternativas descartadas}
+
+\subsection{¿Es Spark la opción correcta para ACC?}
+
+La respuesta es condicional, no binaria, y se sostiene directamente en
+los resultados de las secciones anteriores. A nivel de motor, Spark
+demostró ser técnicamente superior a pandas en las cinco
+transformaciones medidas en PE-U4 (Tabla~\ref{tab:tiempos}), y el
+análisis de Karp-Flatt (Sección~4) permitió diagnosticar con precisión
+que su límite de escalado en T3 proviene de sobrecarga de coordinación
+--- parcialmente explicada por el colapso adaptativo de particiones
+observado en la Spark UI --- y no de una limitación algorítmica del
+\emph{join}. En ese plano, Spark es una elección sólida y validada
+empíricamente con datos propios, no una moda tecnológica adoptada sin
+evidencia.
+
+Sin embargo, el cálculo del umbral de rentabilidad (Sección~6) arroja
+$n^*\approx407{,}206$ registros, mientras que el volumen mensual
+supuesto para ACC (\textasciitilde1\,500 tickets/mes) tardaría más de
+20 años en alcanzarlo. \textbf{Para el caso de uso mensual descrito en
+la Sección~5, Spark no está justificado hoy}: el propio modelo
+matemático que motiva su adopción, aplicado con honestidad a los
+números reales del PFC, recomienda lo contrario a la intuición inicial
+del equipo. La postura de este informe es, por tanto, que Spark debe
+reservarse para cargas de trabajo que sí crucen ese umbral --- el
+histórico acumulado completo, o un reentrenamiento anual del clustering
+--- y no para la detección mensual de reincidencia, que se resuelve de
+forma más simple y con menor costo operativo sin un motor distribuido.
+
+\subsection{Alternativa 1 descartada: agregación en SQL directamente sobre CockroachDB}
+
+CockroachDB soporta funciones de ventana SQL nativas, equivalentes a la
+lógica de Window.partitionBy("client\_id").orderBy("timestamp")
+que hoy implementa $T_{\mathrm{reincidencia}}$ en Spark. Para el volumen
+mensual de ACC, muy por debajo de $n^*$, una consulta SQL directa sobre
+\texttt{ticket\_db} evitaría por completo el costo fijo $\beta$ de
+arrancar una sesión Spark, sin sacrificar corrección. Se descarta como
+reemplazo definitivo --- no como solución mensual, que sí se recomienda
+--- porque no escala si ACC crece varios órdenes de magnitud o si se
+agrega el \emph{clustering} sobre texto, que SQL no puede expresar sin
+extensiones externas; conviene mantenerla exclusivamente para el
+escenario de bajo volumen ya identificado.
+
+\subsection{Alternativa 2 descartada: Dask en lugar de Spark}
+
+Dask ofrece paralelismo de datos en Python puro, sin la sobrecarga de
+serialización JVM$\leftrightarrow$Python (Py4J) que Spark introduce
+incluso en modo local, y encajaría de forma más homogénea con el stack
+Python ya presente en \texttt{ai-service} (FastAPI). Se descarta para
+ACC por dos razones técnicas concretas: (i) el equipo ya validó
+empíricamente su dominio de Spark en PE-U4, incluida la verificación de
+equivalencia numérica pandas$\leftrightarrow$Spark, mientras que migrar
+a Dask reiniciaría ese trabajo de validación sin garantía de mejor
+resultado a este volumen; y (ii) el conector JDBC de Spark hacia
+CockroachDB es más maduro y mejor documentado que el soporte equivalente
+en el ecosistema de Dask, lo que reduce el riesgo de integración en el
+punto de inserción ya definido en la Sección~5.
+
+\subsection{Limitaciones reconocidas de esta propuesta}
+
+Dos limitaciones deben declararse explícitamente. Primero, el
+\emph{clustering} de $T_{\mathrm{clustering}}$ concentra el 81{,}3\,\%
+de los registros en un único clúster, un artefacto de la baja
+variabilidad léxica de las descripciones generadas por plantilla en el
+dataset sintético; su valor de negocio real solo podrá evaluarse con
+descripciones de clientes reales, de mayor diversidad textual, en
+producción. Segundo, los parámetros $\hat\beta$ y $\hat\gamma$ del
+umbral de rentabilidad se estimaron sobre una sesión de Spark en Google
+Colab, cuyo costo fijo de arranque puede no ser representativo de un
+clúster gestionado en producción (por ejemplo, Databricks o EMR); por
+tanto, $n^*=407{,}206$ debe leerse como una estimación de orden de
+magnitud, no como un umbral operativo exacto para un despliegue real de
+ACC \cite{hillmarty2008}.
+
+\section{Conclusiones}
+
+\begin{enumerate}
+  \item El ajuste de la ley de Amdahl sobre T3 ($\hat p=0.4445$,
+  Sección~3) predice una curva monótonamente creciente, pero los datos
+  medidos muestran una inversión de signo entre $N=2$ y $N=4$
+  ($\Delta=+11.49\,\%$ frente a $\Delta=-4.82\,\%$,
+  Tabla~\ref{tab:amdahl}): el modelo clásico, que asume sobrecarga nula,
+  es insuficiente por sí solo para explicar el comportamiento real de un
+  motor distribuido y debe complementarse con un diagnóstico de
+  sobrecarga como el de Karp-Flatt.
+
+  \item La fracción serial experimental de T3 crece un 51.95\,\% entre
+  $N=2$ y $N=4$ ($e:0.395\rightarrow0.601$, Sección~4), y la evidencia
+  directa de la Spark UI --- en particular el colapso adaptativo de
+  particiones a una sola partición --- confirma que la causa es
+  sobrecarga de coordinación del motor, no un límite algorítmico del
+  \emph{join}; esto demuestra que atribuir la pérdida de escalabilidad a
+  ``el motor'' de forma genérica es insuficiente cuando existe evidencia
+  verificable que apunta a un mecanismo específico.
+
+  \item El umbral de rentabilidad calculado para el PFC ACC
+  ($n^*=407{,}206$ registros, Sección~6) es muy superior al volumen
+  mensual realista supuesto (\textasciitilde1\,500 tickets/mes,
+  Sección~5): la decisión técnicamente honesta, sostenida en el propio
+  modelo matemático exigido por esta actividad, es no adoptar Spark
+  para el procesamiento mensual de reincidencia, reservándolo para el
+  histórico acumulado completo una conclusión que contradice la
+  intuición inicial de ``más datos, siempre Spark'' y que solo emerge de
+  cuantificar el umbral con datos propios en vez de asumirlo.
+\end{enumerate}
+
+\section*{Declaración de uso de inteligencia artificial generativa}
+
+Se utilizó Claude (Anthropic) como herramienta de apoyo en las
+siguientes tareas, todas revisadas y validadas por el autor antes de su
+inclusión: (i) verificación técnica del repositorio de PE-U4
+clonación, comprobación de accesibilidad anónima, cotejo línea por línea
+de tiempos crudos.csv/tiempos resumen.csv contra el
+commit declarado, y revisión de \texttt{references\_U4.bib} para
+confirmar qué referencias bibliográficas eran de aporte propio; (ii) cálculos numéricos ajuste por mínimos cuadrados de la fracción
+paralelizable $\hat p$, sustitución numérica de la métrica de
+Karp-Flatt, y regresión lineal para estimar $\hat\alpha,\hat\beta,
+\hat\gamma$ del umbral de rentabilidad , ejecutados como código
+verificable, no estimados a mano; (iii) generación de las figuras
+propias (\texttt{fig\_speedup.png} y
+\texttt{fig\_arquitectura\_integracion.png}) mediante scripts de
+Python, incluida su corrección iterativa tras detectar errores
+tipográficos y de dirección lógica en las flechas; y (iv) redacción
+asistida de las Secciones~3 a~8, sobre la base de datos, decisiones
+arquitectónicas y respuestas de dominio aportadas íntegramente por el
+autor.
+
+Se declara explícitamente una divergencia metodológica identificada
+durante el proceso: el ajuste de $\hat p=0.4445$ obtenido en este
+informe individual, sobre $N=2,4$, difiere del valor $p=0.173423$
+reportado en el informe grupal de PE-U4, que empleó una metodología de
+ajuste distinta. Esta diferencia se declara para dejar constancia de
+que el análisis matemático de este documento es independiente del
+grupal, no una reproducción de sus resultados.
+
+\printbibliography
+
+\end{document}
